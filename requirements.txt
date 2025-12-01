@@ -7,3 +7,5 @@ matplotlib
 seaborn
 shap
 joblib
+gspread
+oauth2client
