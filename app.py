@@ -6,11 +6,11 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import shap
 import os
-import time
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import datetime
 import traceback
+import io
 
 # 设置中文字体
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'Microsoft YaHei']
@@ -18,353 +18,365 @@ plt.rcParams['axes.unicode_minus'] = False
 
 
 # ==========================================
-# 1. 加载资源
+# 1. 加载资源 (v3.0 全能版)
 # ==========================================
 @st.cache_resource
 def load_resources():
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # 路径拼接
-    model_path = os.path.join(current_dir, 'svm_model.pkl')
+    # 路径
+    models_path = os.path.join(current_dir, 'models_pack.pkl')  # 加载模型包
     scaler_path = os.path.join(current_dir, 'scaler.pkl')
     cols_path = os.path.join(current_dir, 'feature_cols.pkl')
     data_path = os.path.join(current_dir, 'train_data.pkl')
 
-    model = joblib.load(model_path)
+    # 加载
+    models_pack = joblib.load(models_path)
     scaler = joblib.load(scaler_path)
     feature_cols = joblib.load(cols_path)
     train_data = joblib.load(data_path)
 
-    return model, scaler, feature_cols, train_data
+    return models_pack, scaler, feature_cols, train_data
 
 
 try:
-    model, scaler, feature_cols, train_data = load_resources()
+    models_pack, scaler, feature_cols, train_data = load_resources()
+    # 解包模型
+    model_cls = models_pack['svm_cls']
+    model_tensile = models_pack['rf_tensile']
+    model_elong = models_pack['rf_elong']
+    model_trans = models_pack['rf_trans']
+
     X_train_df = train_data['X_df']
-    y_train = train_data['y']
 except FileNotFoundError as e:
     st.error(f"❌ 缺少文件: {e}")
+    st.info("请先运行 Train_SVM.py (v3.0) 生成 models_pack.pkl")
     st.stop()
+
 
 # ==========================================
 # 辅助函数：连接 Google Sheets
 # ==========================================
+def get_gsheet_client():
+    scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    json_key_path = os.path.join(current_dir, 'key.json')
+
+    if os.path.exists(json_key_path):
+        creds = ServiceAccountCredentials.from_json_keyfile_name(json_key_path, scope)
+    elif "gcp_service_account" in st.secrets:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    else:
+        return None
+    return gspread.authorize(creds)
+
+
 def add_data_to_gsheet(data_row):
     try:
-        # 1. 关键修复：清洗数据类型 (把 numpy 类型转为原生类型)
-        # Google API 不接受 numpy.int64 或 numpy.float64
         cleaned_row = []
         for item in data_row:
-            if isinstance(item, (np.integer, int)):
-                cleaned_row.append(int(item))
-            elif isinstance(item, (np.floating, float)):
-                cleaned_row.append(float(item))
-            else:
-                cleaned_row.append(str(item))
+            if hasattr(item, "item"): item = item.item()
+            cleaned_row.append(item)
 
-        # 2. 正确的 Scope (接头暗号)
-        scope = [
-            'https://www.googleapis.com/auth/spreadsheets',
-            'https://www.googleapis.com/auth/drive'
-        ]
+        client = get_gsheet_client()
+        if not client:
+            st.error("未找到密钥")
+            return False
 
-        # ==========================================
-        # 获取当前脚本所在路径，确保能找到 key.json
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        json_key_path = os.path.join(current_dir, 'key.json')  # 确保这里文件名对
-
-        # 使用 from_json_keyfile_name 直接读取文件
-        # 这和你刚才运行成功的 debug_google.py 原理一模一样
-        creds = ServiceAccountCredentials.from_json_keyfile_name(json_key_path, scope)
-
-        # ==========================================
-
-        client = gspread.authorize(creds)
-
-        # 3. 📝 关键检查点：打印 ID
-        # 请务必在这里填入你浏览器地址栏里的真实 ID
-        # 不要用我示例的那个！
         sheet_id = "1CQ6VoA24v6KNoVOSDoKmM4_1Lv35eC20oxBTJ8opMKw".strip()
         sheet = client.open_by_key(sheet_id).sheet1
-
-        # 4. 写入
         sheet.append_row(cleaned_row)
         return True
-
     except Exception as e:
-        st.error(f"❌ 发生错误: {e}")
-        # 打印详细错误方便排查
-        st.code(traceback.format_exc())
+        st.error(f"错误: {e}")
         return False
 
 
-    except Exception as e:
-
-        # === 🛠 修改这里：打印详细报错堆栈 ===
-
-        st.error("❌ 发生错误！详细信息如下：")
-
-        st.code(traceback.format_exc())  # 这会显示红色的详细代码错误
-
-        return False
 # ==========================================
-# 2. 页面整体布局 (Tabs)
+# 侧边栏：数据仪表盘 (图标已修复)
 # ==========================================
-st.title("🧪 PVA/CNF 复合薄膜智能协作平台")
+with st.sidebar:
+    # 修复图标：使用 Emoji 或者 Streamlit 原生 Logo，最稳
+    st.header("🧪 实验室看板")
 
-# 创建三个选项卡
-tab1, tab2, tab3 = st.tabs(["🚀 配方预测", "📝 实验数据录入", "📊 模型分析"])
+    if st.button("🔄 刷新数据"):
+        try:
+            client = get_gsheet_client()
+            if client:
+                sheet_id = "1CQ6VoA24v6KNoVOSDoKmM4_1Lv35eC20oxBTJ8opMKw".strip()
+                sheet = client.open_by_key(sheet_id).sheet1
+                records = sheet.get_all_records()
+                df_online = pd.DataFrame(records)
+
+                st.metric("📊 累计数据", f"{len(df_online)} 条")
+
+                # 尝试找最大强度
+                # 模糊匹配表头
+                ts_cols = [c for c in df_online.columns if 'Tensile' in c or '拉伸' in c]
+                if ts_cols:
+                    max_val = pd.to_numeric(df_online[ts_cols[0]], errors='coerce').max()
+                    st.metric("🏆 最高强度记录", f"{max_val} MPa")
+            else:
+                st.warning("连接失败")
+        except:
+            st.error("连接超时")
+
+    st.markdown("---")
+    st.caption("Developed by FengYan Group")
 
 # ==========================================
-# Tab 1: 配方预测 (原来的功能)
+# 主页面
+# ==========================================
+st.title("PVA/CNF 复合薄膜智能协作平台 v3.0")
+
+tab1, tab2, tab3 = st.tabs(["🚀 全能预测", "📝 数据录入", "📊 深度分析"])
+
+# ==========================================
+# Tab 1: 预测 (分类 + 3回归)
 # ==========================================
 with tab1:
-    st.header("新配方性能预测")
+    st.subheader("1. 单点全指标预测")
 
     col1, col2 = st.columns(2)
     with col1:
-        # 为了方便复用，我们把输入控件定义好
-        cnf_content = st.number_input("CNF 含量 (%)", value=0.5, format="%.3f", key="p_cnf")
-        pva_conc = st.number_input("CNF/PVA 浓度 (%)", value=10.0, key="p_conc")
-        num_layer = st.number_input("刮涂层数", value=1, key="p_layer")
-        temp = st.number_input("强度 Ts (MPa)", value=25.0, key="p_temp")
+        cnf_content = st.number_input("CNF 含量 (%)", 0.0, 100.0, 0.5, format="%.3f", key="p_cnf")
+        pva_conc = st.number_input("CNF/PVA 浓度 (%)", 0.0, 100.0, 10.0, key="p_conc")
+        num_layer = st.number_input("刮涂层数", 1, 50, 1, key="p_layer")
+        ts_val = st.number_input("强度 Ts (MPa)", 0.0, 300.0, 25.0, key="p_ts")
     with col2:
-        angle1 = st.number_input("角度 Angle1", value=0.0, key="p_ang1")
-        angle2 = st.number_input("角度 Angle2", value=0.0, key="p_ang2")
-        thickness = st.number_input("厚度 (mm)", value=0.1, key="p_thick")
-        tempo = st.number_input("速率 (Tempo)", value=0.0, key="p_tempo")
+        angle1 = st.number_input("角度 Angle1", 0.0, 180.0, 0.0, key="p_ang1")
+        angle2 = st.number_input("角度 Angle2", 0.0, 180.0, 0.0, key="p_ang2")
+        thickness = st.number_input("厚度 (mm)", 0.0, 5.0, 0.1, key="p_thick")
+        tempo = st.number_input("Tempo 参数", 0.0, 100.0, 0.0, key="p_tempo")
 
     craft_option = st.selectbox("工艺", ("刮涂", "拉伸", "无"), key="p_craft")
 
-    if st.button("开始预测", type="primary"):
-        # 组装数据
+    if st.button("🚀 立即计算", type="primary"):
+        # 1. 组装
         input_data = {
             'CNF_content': cnf_content, 'CNF/PVA_conc': pva_conc, 'NumofLayer': num_layer,
-            'Angle1': angle1, 'Angle2': angle2, 'Thickness': thickness, 'Ts': temp, 'Tempo': tempo,
+            'Angle1': angle1, 'Angle2': angle2, 'Thickness': thickness,
+            'Ts': ts_val, 'Tempo': tempo,
         }
         input_data[f"Craft_{craft_option}"] = 1
-
         arr = np.zeros(len(feature_cols))
-        for i, col in enumerate(feature_cols):
-            arr[i] = input_data.get(col, 0)
+        for i, col in enumerate(feature_cols): arr[i] = input_data.get(col, 0)
 
-        pred = model.predict(scaler.transform(arr.reshape(1, -1)))[0]
+        # 2. 预测
+        X_in = scaler.transform(arr.reshape(1, -1))
+
+        # 跑 4 个模型
+        p_cls = model_cls.predict(X_in)[0]
+        p_ten = model_tensile.predict(X_in)[0]
+        p_elo = model_elong.predict(X_in)[0]
+        p_tra = model_trans.predict(X_in)[0]
+
+        # 3. 展示
+        st.success("✅ 计算完成")
+
+        # 第一行：难易度
         res_map = {0: "难 (Hard)", 1: "中 (Medium)", 2: "易 (Easy)"}
+        color = "red" if p_cls == 0 else "orange" if p_cls == 1 else "green"
+        st.markdown(f"**工艺难度:** :{color}[{res_map[p_cls]}]")
 
-        color = "red" if pred == 0 else "orange" if pred == 1 else "green"
-        st.markdown(f"### 🎯 预测结果: :{color}[{res_map[pred]}]")
+        # 第二行：3个性能指标
+        m1, m2, m3 = st.columns(3)
+        m1.metric("预估强度 (Tensile)", f"{p_ten:.1f} MPa")
+        m2.metric("预估伸长率 (Elongation)", f"{p_elo:.1f} %")
+        m3.metric("预估透光率 (Trans.)", f"{p_tra:.1f} %")
+
+    st.divider()
+
+    # === 批量预测 ===
+    st.subheader("2. 批量预测 (支持所有指标)")
+    uploaded_file = st.file_uploader("上传 Excel 文件", type=["xlsx"])
+
+    if uploaded_file:
+        if st.button("开始批量计算"):
+            try:
+                df_upload = pd.read_excel(uploaded_file)
+
+                # 预处理
+                if 'Craft' in df_upload.columns:
+                    df_upload = pd.get_dummies(df_upload, columns=['Craft'], prefix='Craft')
+
+                df_input = pd.DataFrame(0, index=df_upload.index, columns=feature_cols)
+                for col in feature_cols:
+                    if col in df_upload.columns: df_input[col] = df_upload[col]
+
+                X_batch = scaler.transform(df_input.values)
+
+                # 批量预测所有指标
+                p_cls = model_cls.predict(X_batch)
+                p_ten = model_tensile.predict(X_batch)
+                p_elo = model_elong.predict(X_batch)
+                p_tra = model_trans.predict(X_batch)
+
+                # 写入结果
+                res_map = {0: "难", 1: "中", 2: "易"}
+                df_upload['预测_工艺难度'] = [res_map[x] for x in p_cls]
+                df_upload['预测_拉伸强度'] = p_ten
+                df_upload['预测_伸长率'] = p_elo
+                df_upload['预测_透光率'] = p_tra
+
+                st.dataframe(df_upload.head())
+
+                # 下载
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    df_upload.to_excel(writer, index=False)
+                output.seek(0)
+                st.download_button("📥 下载完整结果.xlsx", data=output, file_name="Full_Prediction.xlsx")
+
+            except Exception as e:
+                st.error(f"出错: {e}")
 
 # ==========================================
-# Tab 2: 数据录入 (Google Sheets 版)
+# Tab 2: 录入 (保持不变)
 # ==========================================
 with tab2:
-    st.header("🔬 实验数据反馈 (云端同步版)")
-    st.markdown("数据将直接写入 **Google Sheets**，永久保存。")
-
+    st.header("🔬 实验数据反馈")
     with st.form("entry_form"):
-        # ... (输入框代码和之前一样，省略重复部分) ...
-        # 假设这里是 cnf_content, pva_conc 等输入框...
-        # 为节省篇幅，这里用变量名代替
-
-        # 模拟几个输入框
         c1, c2 = st.columns(2)
         with c1:
             e_cnf = st.number_input("CNF 含量 (%)", step=0.01)
             e_conc = st.number_input("CNF/PVA 浓度 (%)", step=0.1)
             e_layer = st.number_input("刮涂层数", min_value=1, step=1)
-            e_temp = st.number_input("强度 Ts (MPa)", step=1.0)
+            e_ts = st.number_input("强度 Ts (MPa)", step=1.0)
         with c2:
             e_ang1 = st.number_input("角度 Angle1")
             e_ang2 = st.number_input("角度 Angle2")
             e_thick = st.number_input("厚度 (mm)", step=0.01)
-            e_tempo = st.number_input("速率 (Tempo)")
-
+            e_tempo = st.number_input("Tempo 参数")
         e_craft = st.selectbox("所用工艺", ("刮涂", "拉伸", "无"))
         st.divider()
-
-        # === 🆕 新增部分：力学性能输入 ===
-        st.subheader("2. 性能测试结果 (可选)")
         c3, c4, c5 = st.columns(3)
         with c3:
-            e_tensile = st.number_input("拉伸强度 (MPa)", step=0.1)
+            e_tensile = st.number_input("成品拉伸强度 (MPa)", step=0.1)
         with c4:
             e_elongation = st.number_input("断裂伸长率 (%)", step=0.1)
         with c5:
             e_transmittance = st.number_input("透光率 (%)", step=0.1)
-        # ==============================
         st.divider()
+        e_result = st.selectbox("🧪 综合评价 (可去向性)", ("难", "中", "易"))
 
-        e_result = st.selectbox("🧪 实验结果", ("难", "中", "易"))
-
-        submitted = st.form_submit_button("🚀 提交到云数据库")
-
-        if submitted:
-            # 1. 准备数据列表 (顺序必须和 Google Sheet 表头一致)
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            row_data = [
-                e_cnf, e_conc, e_layer, e_ang1, e_ang2, e_thick, e_temp, e_tempo,
-                e_craft, e_result, e_tensile, e_elongation, e_transmittance, timestamp #时间戳
-            ]
-
-            # 2. 调用函数写入
-            with st.spinner("正在连接 Google Cloud..."):
-                success = add_data_to_gsheet(row_data)
-
-            if success:
-                st.success(f"✅ 成功！数据已写入云端表格。时间: {timestamp}")
-                st.balloons()  # 放个气球庆祝一下
-            else:
-                st.error("❌ 写入失败，请检查网络或联系管理员。")
-    if st.button("🧪 测试写入简单数据 (Test Connection)"):
-        # 构造一个纯英文、纯数字的简单数据
-        test_data = ["Test_Connection", 123, 4.56, "Hello"]
-
-        st.write("正在尝试写入测试数据:", test_data)
-        success = add_data_to_gsheet(test_data)
-
-        if success:
-            st.success("✅ 测试成功！Google Sheet 连接完全正常！")
-            st.info("结论：说明之前的错误是你提交的‘真实数据’里有特殊字符或格式问题。")
-        else:
-            st.error("❌ 测试失败！说明还是连接/权限问题，与数据内容无关。")
+        if st.form_submit_button("🚀 提交"):
+            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            row = [e_cnf, e_conc, e_layer, e_ang1, e_ang2, e_thick, e_ts, e_tempo, e_craft, e_result, e_tensile,
+                   e_elongation, e_transmittance, ts]
+            if add_data_to_gsheet(row):
+                st.success("✅ 写入成功")
 
 # ==========================================
-# Tab 3: 模型分析 (原来的 Analysis)
+# Tab 3: 模型分析 (升级版：支持回归分析)
 # ==========================================
 with tab3:
-    st.header("📊 模型评估与分析")
+    st.header("📊 模型深度分析")
 
-    # ... (这里放你之前 Analysis 部分的代码，为了节省篇幅我简写了) ...
-    # ... 请把你之前写的 R2, Correlation, SHAP 三个按钮的代码完整复制到这里 ...
+    # 1. 选择要分析的模型
+    analysis_target = st.selectbox(
+        "🔎 选择分析目标",
+        ("工艺难易度 (分类)", "拉伸强度 (回归)", "断裂伸长率 (回归)", "透光率 (回归)")
+    )
 
-    col_a, col_b, col_c = st.columns(3)
-    # --- 功能 1: 混淆矩阵 (评估准确度) ---
+    # 根据选择，确定要用的模型
+    if "工艺" in analysis_target:
+        target_model = model_cls
+        model_type = "classification"
+    elif "拉伸" in analysis_target:
+        target_model = model_tensile
+        model_type = "regression"
+    elif "伸长" in analysis_target:
+        target_model = model_elong
+        model_type = "regression"
+    else:
+        target_model = model_trans
+        model_type = "regression"
+
+    col_a, col_b = st.columns(2)
+
+    # --- 相关性矩阵 (通用) ---
+    # --- 相关性矩阵 ---
     with col_a:
-        if st.button("📈 查看模型精度"):
-            st.subheader("模型性能评估 (混淆矩阵)")
-
-            # 1. 用模型预测所有训练数据
-            X_scaled_all = scaler.transform(X_train_df.values)
-            y_pred_all = model.predict(X_scaled_all)
-
-            # 2. 画混淆矩阵
-            from sklearn.metrics import confusion_matrix
-
-            cm = confusion_matrix(y_train, y_pred_all)
-
-            fig, ax = plt.subplots(figsize=(5, 4))
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                        xticklabels=['难', '中', '易'],
-                        yticklabels=['难', '中', '易'])
-            plt.xlabel('预测值')
-            plt.ylabel('真实值')
-            plt.title('模型混淆矩阵')
-
-            # 3. 计算准确率
-            acc = np.mean(y_pred_all == y_train)
-            st.metric("当前模型准确率 (Accuracy)", f"{acc * 100:.1f}%")
-
-            # 4. 显示图表
-            st.pyplot(fig)
-            st.info("💡 解读：对角线上的数字越大越好。如果'难'被预测成'中'，则第一行第二列会有数字。")
-
-    # --- 功能 2: 特征相关性 (数据分析) ---
-    with col_b:
-        if st.button("🔗 特征相关性矩阵"):
-            st.subheader("特征相关性热力图")
-
-            # 计算相关系数
-            # 为了不让图太乱，只选前 8 个数值特征
+        st.subheader("特征相关性")
+        if st.checkbox("显示热力图", value=True):
+            # 取前8列数值特征
             numeric_df = X_train_df.iloc[:, :8]
+
+            # 1. 计算相关系数
             corr = numeric_df.corr()
 
-            fig, ax = plt.subplots(figsize=(6, 5))
+            # ==========================================
+            # 🛠️ 修复空白问题：将 NaN 填充为 0
+            # ==========================================
+            # 如果某列数据完全一样（方差为0），相关性计算会得到 NaN
+            # 我们把它填为 0，代表“无相关性”
+            corr = corr.fillna(0)
+
+            # 2. 画图
+            fig, ax = plt.subplots(figsize=(5, 4))
             sns.heatmap(corr, annot=True, fmt=".2f", cmap='coolwarm', vmin=-1, vmax=1)
             plt.title('配方参数相关性')
 
+            # 3. 显示
             st.pyplot(fig)
-            st.info("💡 解读：红色越深代表正相关（一起变大），蓝色越深代表负相关（一个大一个小）。")
-    # --- 功能 3: SHAP 分析 (修正蜂群图版) ---
-    with col_c:
-        if st.button("🧬 SHAP 特征贡献"):
-            st.subheader("工艺参数影响分析")
 
-            # 1. 锁定前 20 条数据
-            # ⚠️ 确保这里的 X_train_df 包含所有的 8 个数值特征 + Craft 工艺特征
-            X_shap_subset = X_train_df.iloc[:20, :]
+            # 4. 智能提示
+            # 检查一下是不是真的有方差为0的列，提示用户
+            # std_dev = numeric_df.std()
+            # constant_cols = std_dev[std_dev == 0].index.tolist()
+            # if constant_cols:
+            #     st.warning(
+            #         f"⚠️ 注意：以下特征在所有数据中数值完全相同，因此无法计算相关性（显示为0.00）：\n {constant_cols}")
 
-            with st.spinner('正在计算 SHAP 值...'):
+    # --- SHAP 分析 (根据模型类型自动调整) ---
+    with col_b:
+        st.subheader("🧬 SHAP 关键因子分析")
+
+        if st.button(f"分析: {analysis_target}"):
+            X_subset = X_train_df.iloc[:20, :]
+
+            with st.spinner('正在计算特征重要性...'):
                 try:
-                    # 2. 准备背景数据
-                    X_summary = shap.kmeans(X_train_df, 5)
+                    plt.clf()
+
+                    if model_type == "classification":
+                        # SVM 分类模型使用 KernelExplainer (较慢)
+                        X_summary = shap.kmeans(X_train_df, 5)
 
 
-                    # 3. 定义预测函数
-                    def predict_fn(x):
-                        if isinstance(x, pd.DataFrame):
-                            x = x.values
-                        x_scaled = scaler.transform(x)
-                        return model.predict_proba(x_scaled)
+                        def predict_fn(x):
+                            if isinstance(x, pd.DataFrame): x = x.values
+                            x_scaled = scaler.transform(x)
+                            return target_model.predict_proba(x_scaled)
 
 
-                    # 4. 计算 SHAP 值 (KernelExplainer)
-                    explainer = shap.KernelExplainer(predict_fn, X_summary)
-                    shap_values_raw = explainer.shap_values(X_shap_subset)
+                        explainer = shap.KernelExplainer(predict_fn, X_summary)
+                        shap_vals = explainer.shap_values(X_subset)
+                        # 取 "易" (Index 2)
+                        if isinstance(shap_vals, list):
+                            sv = shap_vals[2]
+                        else:
+                            sv = shap_vals
+                        if len(sv.shape) == 3: sv = sv.sum(axis=2)
 
-                    # ==========================================
-                    # 🛑 关键修复：确保提取正确的维度
-                    # ==========================================
-
-                    # 针对 SVM (SVC probability=True)，shap_values_raw 是一个 list
-                    # list[0] = 类别0 (难) 的 SHAP 值
-                    # list[1] = 类别1 (中) 的 SHAP 值
-                    # list[2] = 类别2 (易) 的 SHAP 值
-
-                    if isinstance(shap_values_raw, list):
-                        # 我们只看 "易" (Index=2)
-                        shap_vals = shap_values_raw[2]
                     else:
-                        # 如果是二分类，有时候只返回一个 array
-                        shap_vals = shap_values_raw
+                        # 随机森林回归模型使用 TreeExplainer (超级快！)
+                        # 注意：TreeExplainer 不需要标准化后的数据，直接用原始数据即可(如果是树模型)
+                        # 但因为我们训练时 fit 进去的是 X_scaled，所以这里还是用 X_scaled 比较严谨
+                        X_subset_scaled = scaler.transform(X_subset.values)
+                        explainer = shap.TreeExplainer(target_model)
+                        sv = explainer.shap_values(X_subset_scaled)
 
-                    # 再次检查：shap_vals 必须是 (20, n_features) 的 2维数组
-                    # 如果它变成了 3维，就会画出你刚才那个错误的图
-                    if len(shap_vals.shape) == 3:
-                        st.warning("检测到交互值，正在降维...")
-                        shap_vals = shap_vals.sum(axis=2)  # 强制压平
+                    # 绘图
+                    shap.summary_plot(sv, X_subset, max_display=10, show=False)
+                    st.pyplot(plt.gcf(), clear_figure=True)
+                    st.success("✅ 分析完成")
 
-                    # ==========================================
-                    # 📊 绘图：标准的蜂群图 (Beeswarm)
-                    # ==========================================
-                    plt.clf()  # 清空画布
-
-                    # max_display=10: 只显示最重要的前 10 个特征
-                    shap.summary_plot(
-                        shap_vals,
-                        X_shap_subset,
-                        max_display=10,
-                        show=False
-                    )
-
-                    # 抓取图片
-                    fig_shap = plt.gcf()
-                    plt.tight_layout()
-
-                    st.pyplot(fig_shap, clear_figure=True)
-
-                    st.success("✅ 分析完成！")
-                    st.markdown("""
-                    **如何看这张图（蜂群图）：**
-                    1.  **左侧文字**：特征按重要性**从上到下**排列（最上面的最重要）。
-                    2.  **横轴 (SHAP Value)**：
-                        *   **右侧 (>0)**：促进成膜（容易）。
-                        *   **左侧 (<0)**：阻碍成膜（难/中）。
-                    3.  **颜色**：
-                        *   🔴 **红色**：数值大（如高温、高浓度）。
-                        *   🔵 **蓝色**：数值小（如低温、低浓度）。
-                    """)
+                    if model_type == "regression":
+                        st.info("💡 回归模型解读：红色点在右边 = 该特征数值越大，预测结果(如强度)越高。")
 
                 except Exception as e:
                     st.error(f"分析失败: {e}")
-                    st.write("调试信息 - SHAP 数据类型:", type(shap_values_raw))
+                    st.code(traceback.format_exc())

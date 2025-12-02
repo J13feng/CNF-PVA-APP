@@ -9,3 +9,4 @@ shap
 joblib
 gspread
 oauth2client
+xlsxwriter
