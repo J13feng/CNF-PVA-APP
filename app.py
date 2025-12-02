@@ -10,6 +10,7 @@ import time
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import datetime
+import traceback
 
 # 设置中文字体
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'Microsoft YaHei']
@@ -45,34 +46,67 @@ except FileNotFoundError as e:
     st.error(f"❌ 缺少文件: {e}")
     st.stop()
 
-
 # ==========================================
 # 辅助函数：连接 Google Sheets
 # ==========================================
 def add_data_to_gsheet(data_row):
     try:
-        # 1. 获取 Secrets 里的配置
-        # 注意：Streamlit 会把 secrets.toml 里的内容自动转换成 st.secrets 对象
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        # 1. 关键修复：清洗数据类型 (把 numpy 类型转为原生类型)
+        # Google API 不接受 numpy.int64 或 numpy.float64
+        cleaned_row = []
+        for item in data_row:
+            if isinstance(item, (np.integer, int)):
+                cleaned_row.append(int(item))
+            elif isinstance(item, (np.floating, float)):
+                cleaned_row.append(float(item))
+            else:
+                cleaned_row.append(str(item))
 
-        # 从 secrets 创建凭证
-        # create_scoped 需要一个字典，我们直接用 st.secrets 里的内容
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        # 2. 正确的 Scope (接头暗号)
+        scope = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
+        ]
 
-        # 2. 连接 Google Sheets
+        # ==========================================
+        # 获取当前脚本所在路径，确保能找到 key.json
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        json_key_path = os.path.join(current_dir, 'key.json')  # 确保这里文件名对
+
+        # 使用 from_json_keyfile_name 直接读取文件
+        # 这和你刚才运行成功的 debug_google.py 原理一模一样
+        creds = ServiceAccountCredentials.from_json_keyfile_name(json_key_path, scope)
+
+        # ==========================================
+
         client = gspread.authorize(creds)
 
-        # 3. 打开具体的表格 (请把这里改成你的表格名字！)
-        sheet = client.open("PVA_Experiment_Data").sheet1
+        # 3. 📝 关键检查点：打印 ID
+        # 请务必在这里填入你浏览器地址栏里的真实 ID
+        # 不要用我示例的那个！
+        sheet_id = "1CQ6VoA24v6KNoVOSDoKmM4_1Lv35eC20oxBTJ8opMKw".strip()
+        sheet = client.open_by_key(sheet_id).sheet1
 
-        # 4. 追加一行数据
-        sheet.append_row(data_row)
+        # 4. 写入
+        sheet.append_row(cleaned_row)
         return True
+
     except Exception as e:
-        st.error(f"云端写入失败: {e}")
+        st.error(f"❌ 发生错误: {e}")
+        # 打印详细错误方便排查
+        st.code(traceback.format_exc())
         return False
 
+
+    except Exception as e:
+
+        # === 🛠 修改这里：打印详细报错堆栈 ===
+
+        st.error("❌ 发生错误！详细信息如下：")
+
+        st.code(traceback.format_exc())  # 这会显示红色的详细代码错误
+
+        return False
 # ==========================================
 # 2. 页面整体布局 (Tabs)
 # ==========================================
@@ -93,12 +127,12 @@ with tab1:
         cnf_content = st.number_input("CNF 含量 (%)", value=0.5, format="%.3f", key="p_cnf")
         pva_conc = st.number_input("CNF/PVA 浓度 (%)", value=10.0, key="p_conc")
         num_layer = st.number_input("刮涂层数", value=1, key="p_layer")
-        temp = st.number_input("温度 Ts (℃)", value=25.0, key="p_temp")
+        temp = st.number_input("强度 Ts (MPa)", value=25.0, key="p_temp")
     with col2:
         angle1 = st.number_input("角度 Angle1", value=0.0, key="p_ang1")
         angle2 = st.number_input("角度 Angle2", value=0.0, key="p_ang2")
         thickness = st.number_input("厚度 (mm)", value=0.1, key="p_thick")
-        tempo = st.number_input("Tempo 参数", value=0.0, key="p_tempo")
+        tempo = st.number_input("速率 (Tempo)", value=0.0, key="p_tempo")
 
     craft_option = st.selectbox("工艺", ("刮涂", "拉伸", "无"), key="p_craft")
 
@@ -138,15 +172,28 @@ with tab2:
             e_cnf = st.number_input("CNF 含量 (%)", step=0.01)
             e_conc = st.number_input("CNF/PVA 浓度 (%)", step=0.1)
             e_layer = st.number_input("刮涂层数", min_value=1, step=1)
-            e_temp = st.number_input("温度 Ts (℃)", step=1.0)
+            e_temp = st.number_input("强度 Ts (MPa)", step=1.0)
         with c2:
             e_ang1 = st.number_input("角度 Angle1")
             e_ang2 = st.number_input("角度 Angle2")
             e_thick = st.number_input("厚度 (mm)", step=0.01)
-            e_tempo = st.number_input("Tempo 参数")
+            e_tempo = st.number_input("速率 (Tempo)")
 
         e_craft = st.selectbox("所用工艺", ("刮涂", "拉伸", "无"))
         st.divider()
+
+        # === 🆕 新增部分：力学性能输入 ===
+        st.subheader("2. 性能测试结果 (可选)")
+        c3, c4, c5 = st.columns(3)
+        with c3:
+            e_tensile = st.number_input("拉伸强度 (MPa)", step=0.1)
+        with c4:
+            e_elongation = st.number_input("断裂伸长率 (%)", step=0.1)
+        with c5:
+            e_transmittance = st.number_input("透光率 (%)", step=0.1)
+        # ==============================
+        st.divider()
+
         e_result = st.selectbox("🧪 实验结果", ("难", "中", "易"))
 
         submitted = st.form_submit_button("🚀 提交到云数据库")
@@ -157,7 +204,7 @@ with tab2:
 
             row_data = [
                 e_cnf, e_conc, e_layer, e_ang1, e_ang2, e_thick, e_temp, e_tempo,
-                e_craft, e_result, timestamp
+                e_craft, e_result, e_tensile, e_elongation, e_transmittance, timestamp #时间戳
             ]
 
             # 2. 调用函数写入
@@ -169,6 +216,18 @@ with tab2:
                 st.balloons()  # 放个气球庆祝一下
             else:
                 st.error("❌ 写入失败，请检查网络或联系管理员。")
+    if st.button("🧪 测试写入简单数据 (Test Connection)"):
+        # 构造一个纯英文、纯数字的简单数据
+        test_data = ["Test_Connection", 123, 4.56, "Hello"]
+
+        st.write("正在尝试写入测试数据:", test_data)
+        success = add_data_to_gsheet(test_data)
+
+        if success:
+            st.success("✅ 测试成功！Google Sheet 连接完全正常！")
+            st.info("结论：说明之前的错误是你提交的‘真实数据’里有特殊字符或格式问题。")
+        else:
+            st.error("❌ 测试失败！说明还是连接/权限问题，与数据内容无关。")
 
 # ==========================================
 # Tab 3: 模型分析 (原来的 Analysis)
