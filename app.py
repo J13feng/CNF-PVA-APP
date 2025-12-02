@@ -95,22 +95,54 @@ def get_gsheet_client():
 
 def add_data_to_gsheet(data_row):
     try:
+        # 1. 数据清洗
         cleaned_row = []
         for item in data_row:
             if hasattr(item, "item"): item = item.item()
             cleaned_row.append(item)
 
-        client = get_gsheet_client()
-        if not client:
-            st.error("未找到密钥")
+        # 2. Scope 设置
+        scope = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
+        ]
+
+        # 3. 智能获取凭证 (双模逻辑)
+        creds = None
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        json_key_path = os.path.join(current_dir, 'key.json')
+
+        # --- 模式 A: 本地开发 (优先找 key.json) ---
+        if os.path.exists(json_key_path):
+            # print("正在使用本地 key.json") # 调试用
+            creds = ServiceAccountCredentials.from_json_keyfile_name(json_key_path, scope)
+
+        # --- 模式 B: 云端部署 (如果没有文件，找 Secrets) ---
+        elif "gcp_service_account" in st.secrets:
+            # print("正在使用云端 Secrets") # 调试用
+            # 注意：st.secrets 返回的是特殊对象，必须转为普通 dict
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+
+        # --- 模式 C: 都没找到 ---
+        else:
+            st.error("❌ 严重错误：未找到密钥！请在本地放入 key.json，或在云端 Settings -> Secrets 中配置。")
             return False
 
+        # 4. 连接
+        client = gspread.authorize(creds)
+
+        # 5. 打开表格
         sheet_id = "1CQ6VoA24v6KNoVOSDoKmM4_1Lv35eC20oxBTJ8opMKw".strip()
         sheet = client.open_by_key(sheet_id).sheet1
+
+        # 6. 写入
         sheet.append_row(cleaned_row)
         return True
+
     except Exception as e:
-        st.error(f"错误: {e}")
+        st.error("❌ 发生错误！")
+        st.code(traceback.format_exc())
         return False
 
 
