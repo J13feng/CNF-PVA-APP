@@ -18,20 +18,23 @@ plt.rcParams['axes.unicode_minus'] = False
 
 
 # ==========================================
-# 1. 加载资源 (v3.0 全能版)
+# 1. 加载资源 (v3.0 全能版 + 自动热更新)
 # ==========================================
 @st.cache_resource
-def load_resources():
+def load_resources(last_updated):  # <--- 传入时间戳，利用 Streamlit 缓存机制实现热更新
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # 路径
-    models_path = os.path.join(current_dir, 'models_pack.pkl')  # 加载模型包
+    # 定义所有文件路径
+    # 注意：v3.0 主要加载 models_pack.pkl
+    pack_path = os.path.join(current_dir, 'models_pack.pkl')
     scaler_path = os.path.join(current_dir, 'scaler.pkl')
     cols_path = os.path.join(current_dir, 'feature_cols.pkl')
     data_path = os.path.join(current_dir, 'train_data.pkl')
 
-    # 加载
-    models_pack = joblib.load(models_path)
+    print(f"检测到模型文件更新 (时间戳: {last_updated})，正在重新加载内存...")
+
+    # 加载文件
+    models_pack = joblib.load(pack_path)
     scaler = joblib.load(scaler_path)
     feature_cols = joblib.load(cols_path)
     train_data = joblib.load(data_path)
@@ -40,19 +43,37 @@ def load_resources():
 
 
 try:
-    models_pack, scaler, feature_cols, train_data = load_resources()
-    # 解包模型
-    model_cls = models_pack['svm_cls']
-    model_tensile = models_pack['rf_tensile']
-    model_elong = models_pack['rf_elong']
-    model_trans = models_pack['rf_trans']
+    # 1. 获取当前模型文件的修改时间 (作为缓存的指纹)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    pack_path = os.path.join(current_dir, 'models_pack.pkl')
 
+    # 如果文件不存在，直接报错停止，不往下走了
+    if not os.path.exists(pack_path):
+        raise FileNotFoundError(f"找不到 {pack_path}")
+
+    last_modified_time = os.path.getmtime(pack_path)
+
+    # 2. 调用加载函数 (传入时间戳)
+    models_pack, scaler, feature_cols, train_data = load_resources(last_modified_time)
+
+    # 3. 解包模型 (从字典里取出 4 个模型)
+    model_cls = models_pack['svm_cls']  # 分类模型
+    model_tensile = models_pack['rf_tensile']  # 回归模型1
+    model_elong = models_pack['rf_elong']  # 回归模型2
+    model_trans = models_pack['rf_trans']  # 回归模型3
+
+    # 4. 提取训练数据 (用于分析画图)
     X_train_df = train_data['X_df']
-except FileNotFoundError as e:
-    st.error(f"❌ 缺少文件: {e}")
-    st.info("请先运行 Train_SVM.py (v3.0) 生成 models_pack.pkl")
-    st.stop()
+    y_train = train_data['y_cls']  # ✅ 这里必须用 y_cls，对应 v3.0 的键名
 
+except FileNotFoundError as e:
+    st.error(f"❌ 启动失败: {e}")
+    st.info("💡 请先运行 Train_SVM.py (v3.0) 生成 models_pack.pkl 等文件")
+    st.stop()
+except KeyError as e:
+    st.error(f"❌ 模型文件结构不匹配: 缺少键 {e}")
+    st.info("💡 你的 .pkl 文件可能是旧版本的。请重新运行 Train_SVM.py 更新所有文件。")
+    st.stop()
 
 # ==========================================
 # 辅助函数：连接 Google Sheets
@@ -128,9 +149,9 @@ with st.sidebar:
 # ==========================================
 # 主页面
 # ==========================================
-st.title("PVA/CNF 复合薄膜智能协作平台 v3.0")
+st.title("CNF/PVA 复合薄膜智能协作平台")
 
-tab1, tab2, tab3 = st.tabs(["🚀 全能预测", "📝 数据录入", "📊 深度分析"])
+tab1, tab2, tab3 = st.tabs(["🚀 全能预测", "📝 数据录入", "📊 模型分析"])
 
 # ==========================================
 # Tab 1: 预测 (分类 + 3回归)
@@ -148,7 +169,7 @@ with tab1:
         angle1 = st.number_input("角度 Angle1", 0.0, 180.0, 0.0, key="p_ang1")
         angle2 = st.number_input("角度 Angle2", 0.0, 180.0, 0.0, key="p_ang2")
         thickness = st.number_input("厚度 (mm)", 0.0, 5.0, 0.1, key="p_thick")
-        tempo = st.number_input("Tempo 参数", 0.0, 100.0, 0.0, key="p_tempo")
+        tempo = st.number_input("速率 Tempo", 0.0, 100.0, 0.0, key="p_tempo")
 
     craft_option = st.selectbox("工艺", ("刮涂", "拉伸", "无"), key="p_craft")
 
@@ -248,12 +269,12 @@ with tab2:
             e_ang1 = st.number_input("角度 Angle1")
             e_ang2 = st.number_input("角度 Angle2")
             e_thick = st.number_input("厚度 (mm)", step=0.01)
-            e_tempo = st.number_input("Tempo 参数")
+            e_tempo = st.number_input("速率 Tempo")
         e_craft = st.selectbox("所用工艺", ("刮涂", "拉伸", "无"))
         st.divider()
         c3, c4, c5 = st.columns(3)
         with c3:
-            e_tensile = st.number_input("成品拉伸强度 (MPa)", step=0.1)
+            e_tensile = st.number_input("拉伸强度 (MPa)", step=0.1)
         with c4:
             e_elongation = st.number_input("断裂伸长率 (%)", step=0.1)
         with c5:
@@ -272,7 +293,7 @@ with tab2:
 # Tab 3: 模型分析 (升级版：支持回归分析)
 # ==========================================
 with tab3:
-    st.header("📊 模型深度分析")
+    st.header("📊 模型解释分析")
 
     # 1. 选择要分析的模型
     analysis_target = st.selectbox(
@@ -297,38 +318,50 @@ with tab3:
     col_a, col_b = st.columns(2)
 
     # --- 相关性矩阵 (通用) ---
-    # --- 相关性矩阵 ---
+    # --- 功能 2: 特征与目标相关性矩阵 (升级版) ---
     with col_a:
-        st.subheader("特征相关性")
+        st.subheader("特征-目标相关性")
         if st.checkbox("显示热力图", value=True):
-            # 取前8列数值特征
-            numeric_df = X_train_df.iloc[:, :8]
+            # 1. 准备数据
+            # 先取前8个数值型特征
+            df_analysis = X_train_df.iloc[:, :8].copy()
 
-            # 1. 计算相关系数
-            corr = numeric_df.corr()
+            # 关键步骤：把 4 个目标列拼接到表格后面
+            # 这样算出来的矩阵就会包含 特征 vs 目标 的关系
+            df_analysis['工艺难度'] = train_data['y_cls']
+            df_analysis['拉伸强度'] = train_data['y_tensile']
+            df_analysis['伸长率'] = train_data['y_elong']
+            df_analysis['透光率'] = train_data['y_trans']
 
-            # ==========================================
-            # 🛠️ 修复空白问题：将 NaN 填充为 0
-            # ==========================================
-            # 如果某列数据完全一样（方差为0），相关性计算会得到 NaN
-            # 我们把它填为 0，代表“无相关性”
+            # 2. 计算相关系数
+            corr = df_analysis.corr()
+
+            # 🛠️ 修复空白问题：将 NaN 填充为 0 (防止Angle2这种不变的列导致报错)
             corr = corr.fillna(0)
 
-            # 2. 画图
-            fig, ax = plt.subplots(figsize=(5, 4))
-            sns.heatmap(corr, annot=True, fmt=".2f", cmap='coolwarm', vmin=-1, vmax=1)
-            plt.title('配方参数相关性')
+            # 3. 画图
+            # 画布调大一点 (10, 8)，因为现在列多了，太小看不清
+            fig, ax = plt.subplots(figsize=(10, 8))
 
-            # 3. 显示
+            # 绘制热力图
+            sns.heatmap(
+                corr,
+                annot=True,
+                fmt=".2f",
+                cmap='coolwarm',
+                vmin=-1, vmax=1,
+                center=0,
+                square=True,
+                cbar_kws={"shrink": .5}  # 调整颜色条大小
+            )
+            plt.title('全要素相关性分析 (Feature-Target Correlation)', fontsize=14)
+            plt.xticks(rotation=45, ha='right')  # 标签以此倾斜，防止重叠
+
+            # 4. 显示
             st.pyplot(fig)
 
-            # 4. 智能提示
-            # 检查一下是不是真的有方差为0的列，提示用户
-            # std_dev = numeric_df.std()
-            # constant_cols = std_dev[std_dev == 0].index.tolist()
-            # if constant_cols:
-            #     st.warning(
-            #         f"⚠️ 注意：以下特征在所有数据中数值完全相同，因此无法计算相关性（显示为0.00）：\n {constant_cols}")
+            # st.info(
+            #     "💡 **如何看这张图？**\n请重点关注 **最后 4 行/列**。例如：看 `CNF_content` 和 `拉伸强度` 的交叉点，如果是红色，说明含量越高强度越大；如果是蓝色，说明含量越高强度越小。")
 
     # --- SHAP 分析 (根据模型类型自动调整) ---
     with col_b:
