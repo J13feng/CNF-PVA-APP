@@ -10,3 +10,4 @@ joblib
 gspread
 oauth2client
 xlsxwriter
+streamlit-authenticator
